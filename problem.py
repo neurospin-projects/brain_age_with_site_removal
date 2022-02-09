@@ -292,7 +292,7 @@ def get_cv(X, y):
     return folds
 
 
-def _read_data(path, dataset):
+def _read_data(path, dataset, target=["age", "site"]):
     """ Read data.
 
     Parameters
@@ -311,9 +311,9 @@ def _read_data(path, dataset):
     """
     if dataset == "private_test" and not os.path.isfile(os.path.join(
             path, "data", dataset + ".tsv")):
-        dataset = "test"
+        dataset = "external_test"
     df = pd.read_csv(os.path.join(path, "data", dataset + ".tsv"), sep="\t")
-    y_arr = df[["age", "site"]].values
+    y_arr = df[target].values
     x_arr = np.load(os.path.join(path, "data", dataset + ".npy"),
                     mmap_mode="r")
     return x_arr, y_arr
@@ -322,13 +322,13 @@ def _read_data(path, dataset):
 def get_train_data(path="."):
     """ Get openBHB public train set.
     """
-    return _read_data(path, "train")
+    return _read_data(path, "train", ["age", "site"])
 
 
 def get_test_data(path="."):
     """ Get openBHB public test set.
     """
-    return _read_data(path, "test")
+    return _read_data(path, "test", ["age", "site"])
 
 
 def get_private_test_data(path="."):
@@ -338,41 +338,41 @@ def get_private_test_data(path="."):
     The set is used when computing the combined loss. Locally this set is
     replaced by the public test set, and the combined loss may not be relevant.
     """
-    return _read_data(path, "private_test")
+    return _read_data(path, "private_test", ["age"])
 
 
 problem_title = (
     "Brain age prediction and debiasing with site-effect removal in MRI "
     "through representation learning.")
-_, y = get_train_data()
-_prediction_site_names = sorted(np.unique(y[:, 1]))
-_target_column_names = ["age", "site"]
+# _, y = get_train_data()
+# _prediction_site_names = sorted(np.unique(y[:, 1]))
+# _target_column_names = ["age", "site"]
 private_mae_memory = {}
-Predictions_age = rw.prediction_types.make_regression(
-    label_names=[_target_column_names[0]])
-Predictions_site = rw.prediction_types.make_multiclass(
-    label_names=_prediction_site_names)
-Predictions = rw.prediction_types.make_combined(
-    [Predictions_age, Predictions_site])
-score_type_r2_age = R2(name="r2_age", precision=3)
-score_type_mae_age = MAE(name="mae_age", precision=3)
-score_type_rmse_age = rw.score_types.RMSE(name="rmse_age", precision=3)
-score_type_acc_site = rw.score_types.Accuracy(name="acc_site", precision=3)
-score_type_bacc_site = BACC(name="bacc_site", precision=3)
-score_type_ext_mae_age = ExtMAE(memory=private_mae_memory, name="ext_mae_age",
-                                precision=3)
-score_types = [
-    DeepDebiasingMetric(
-        name="challenge_metric", precision=3,
-        n_sites=len(_prediction_site_names), memory=private_mae_memory,
-        score_types=[score_type_mae_age, score_type_bacc_site]),
-    rw.score_types.MakeCombined(score_type=score_type_r2_age, index=0),
-    rw.score_types.MakeCombined(score_type=score_type_mae_age, index=0),
-    rw.score_types.MakeCombined(score_type=score_type_rmse_age, index=0),
-    rw.score_types.MakeCombined(score_type=score_type_acc_site, index=1),
-    rw.score_types.MakeCombined(score_type=score_type_bacc_site, index=1),
-    rw.score_types.MakeCombined(score_type=score_type_ext_mae_age, index=0)
-]
+# Predictions_age = rw.prediction_types.make_regression(
+#     label_names=[_target_column_names[0]])
+# Predictions_site = rw.prediction_types.make_multiclass(
+#     label_names=_prediction_site_names)
+# Predictions = rw.prediction_types.make_combined(
+#     [Predictions_age, Predictions_site])
+# score_type_r2_age = R2(name="r2_age", precision=3)
+# score_type_mae_age = MAE(name="mae_age", precision=3)
+# score_type_rmse_age = rw.score_types.RMSE(name="rmse_age", precision=3)
+# score_type_acc_site = rw.score_types.Accuracy(name="acc_site", precision=3)
+# score_type_bacc_site = BACC(name="bacc_site", precision=3)
+# score_type_ext_mae_age = ExtMAE(memory=private_mae_memory, name="ext_mae_age",
+#                                 precision=3)
+# score_types = [
+#     DeepDebiasingMetric(
+#         name="challenge_metric", precision=3,
+#         n_sites=len(_prediction_site_names), memory=private_mae_memory,
+#         score_types=[score_type_mae_age, score_type_bacc_site]),
+#     rw.score_types.MakeCombined(score_type=score_type_r2_age, index=0),
+#     rw.score_types.MakeCombined(score_type=score_type_mae_age, index=0),
+#     rw.score_types.MakeCombined(score_type=score_type_rmse_age, index=0),
+#     rw.score_types.MakeCombined(score_type=score_type_acc_site, index=1),
+#     rw.score_types.MakeCombined(score_type=score_type_bacc_site, index=1),
+#     rw.score_types.MakeCombined(score_type=score_type_ext_mae_age, index=0)
+# ]
 workflow = DeepDebiasingEstimator(
     memory=private_mae_memory, filename="estimator.py",
     additional_filenames=["weights.pth", "metadata.pkl"])
