@@ -13,14 +13,6 @@ import urllib.request
 import pandas as pd
 import numpy as np
 
-try:
-    PATH_DATA = os.path.join(
-        os.path.dirname(os.path.abspath(__file__)), "data")
-except NameError:
-    PATH_DATA = "data"
-os.makedirs(PATH_DATA, exist_ok=True)
-
-
 def fetch_data(basenames, rootdir, base_url, verbose=1):
     """ Fetch dataset.
 
@@ -88,22 +80,27 @@ def generate_random_data(rootdir, dtype, n_samples):
 
 
 if __name__ == "__main__":
-
     import argparse
+    try:
+        default_root_pth = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data")
+    except NameError:
+        default_root_pth = "data"
 
     parser = argparse.ArgumentParser(description="Prepare data")
-    parser.add_argument("--test", action="store_true",
-                        help="generate a random test set.")
+    parser.add_argument("--root", default=default_root_pth, type=str, helper="Directory where to save the data")
+    parser.add_argument("--test", action="store_true", help="generate a random test set.")
     args = parser.parse_args()
 
+    # Creates a directory if it does not already exist
+    os.makedirs(args.root, exist_ok=True)
+
     if args.test:
-        generate_random_data(rootdir=PATH_DATA, dtype="train", n_samples=20)
-        generate_random_data(rootdir=PATH_DATA, dtype="test", n_samples=10)
-        generate_random_data(rootdir=PATH_DATA, dtype="private_test",
-                             n_samples=10)
+        generate_random_data(rootdir=args.root, dtype="train", n_samples=20)
+        generate_random_data(rootdir=args.root, dtype="test", n_samples=10)
+        generate_random_data(rootdir=args.root, dtype="external_test", n_samples=10)
     else:
         fetch_data(basenames=["train.npy", "train.tsv", "test.npy", "test.tsv",
-                              "private_test.npy", "private_test.tsv"],
-                   rootdir=PATH_DATA,
-                   base_url=("ftp://ftp.cea.fr/pub/unati/share/OpenBHB"),
+                              "external_test.npy", "external_test.tsv"],
+                   rootdir=args.root,
+                   base_url="ftp://ftp.cea.fr/pub/unati/share/OpenBHB",
                    verbose=1)

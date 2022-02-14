@@ -22,96 +22,13 @@ import os
 from collections import OrderedDict
 from abc import ABCMeta
 import progressbar
-import nibabel
 import numpy as np
-from nilearn.masking import unmask
-from sklearn.base import BaseEstimator
-from sklearn.base import TransformerMixin
 from sklearn.pipeline import make_pipeline
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import torch.utils.checkpoint as cp
-
-
-############################################################################
-# Define here some selectors
-############################################################################
-
-class FeatureExtractor(BaseEstimator, TransformerMixin):
-    """ Select only the requested data associatedd features from the the
-    input buffered data.
-    """
-    MODALITIES = OrderedDict([
-        ("vbm", {
-            "shape": (-1, 1, 121, 145, 121),
-            "size": 519945}),
-        ("quasiraw", {
-            "shape": (-1, 1, 182, 218, 182),
-            "size": 1827095}),
-        ("vbm_roi", {
-            "shape": (-1, 1, 284),
-            "size": 284}),
-        ("desikan_roi", {
-            "shape": (-1, 7, 68),
-            "size": 476}),
-        ("destrieux_roi", {
-            "shape": (-1, 7, 148),
-            "size": 1036})
-    ])
-    MASKS = {
-        "vbm": {
-            "path": os.path.join(
-                os.path.dirname(__file__),
-                "cat12vbm_space-MNI152_desc-gm_TPM.nii.gz"),
-            "thr": 0.05},
-        "quasiraw": {
-            "path": os.path.join(
-                os.path.dirname(__file__),
-                "quasiraw_space-MNI152_desc-brain_T1w.nii.gz"),
-            "thr": 0}
-    }
-
-    def __init__(self, dtype):
-        """ Init class.
-
-        Parameters
-        ----------
-        dtype: str
-            the requested data: 'vbm', 'quasiraw', 'vbm_roi', 'desikan_roi',
-            or 'destrieux_roi'.
-        """
-        if dtype not in self.MODALITIES:
-            raise ValueError("Invalid input data type.")
-        self.dtype = dtype
-        data_types = list(self.MODALITIES.keys())
-        index = data_types.index(dtype)
-        cumsum = np.cumsum([item["size"] for item in self.MODALITIES.values()])
-        if index > 0:
-            self.start = cumsum[index - 1]
-        else:
-            self.start = 0
-        self.stop = cumsum[index]
-        self.masks = dict((key, val["path"])
-                          for key, val in self.MASKS.items())
-        for key in self.masks:
-            arr = nibabel.load(self.masks[key]).get_fdata()
-            thr = self.MASKS[key]["thr"]
-            arr[arr <= thr] = 0
-            arr[arr > thr] = 1
-            self.masks[key] = nibabel.Nifti1Image(arr.astype(int), np.eye(4))
-
-    def fit(self, X, y):
-        return self
-
-    def transform(self, X):
-        select_X = X[:, self.start:self.stop]
-        if self.dtype in ("vbm", "quasiraw"):
-            im = unmask(select_X, self.masks[self.dtype])
-            select_X = im.get_fdata()
-        select_X = select_X.reshape(self.MODALITIES[self.dtype]["shape"])
-        return select_X
-
+from dataset.openbhb import FeatureExtractor
 
 ############################################################################
 # Define here your dataset
@@ -147,10 +64,8 @@ class Dataset(torch.utils.data.Dataset):
     def __getitem__(self, i):
         real_i = self.indices[i]
         X = self.X[real_i]
-        X = np.expand_dims(X, axis=0)
         for trf in self.transforms:
             X = trf.transform(X)
-        X = X[0]
         X = torch.from_numpy(X)
         if self.y is not None:
             y = self.y[real_i]
@@ -169,14 +84,9 @@ class Standardizer(object):
         return self
 
     def transform(self, X):
-        n_samples = X.shape[0]
-        _X = []
-        for idx in range(n_samples):
-            arr = X[idx]
-            for process in self.processes:
-                arr = process(arr)
-            _X.append(arr)
-        return np.asarray(_X)
+        for process in self.processes:
+            X = process(X)
+        return X
 
 
 class Normalize(object):
@@ -261,47 +171,35 @@ class Pad(object):
 ############################################################################
 
 class DenseNet(nn.Module):
-    """Densenet-BC model class, based on `"Densely Connected Convolutional
-    Networks" <https://arxiv.org/pdf/1608.06993.pdf>`_.
+    """3D-Densenet-BC model class, based on
+    `"Densely Connected Convolutional Networks" <https://arxiv.org/pdf/1608.06993.pdf>`_
+    Args:
+        growth_rate (int) - how many filters to add each layer (`k` in paper)
+        block_config (list of 4 ints) - how many layers in each pooling block
+        num_init_features (int) - the number of filters to learn in the first convolution layer
+        mode (str) - "classifier" or "encoder" (all but last FC layer)
+        bn_size (int) - multiplicative factor for number of bottle neck layers
+          (i.e. bn_size * k features in the bottleneck layer)
+        num_classes (int) - number of classification classes
+        memory_efficient (bool) - If True, uses checkpointing. Much more memory efficient,
+          but slower. Default: *False*. See `"paper" <https://arxiv.org/pdf/1707.06990.pdf>`_
     """
-    def __init__(self, growth_rate=32, block_config=(3, 12, 24, 16),
-                 num_init_features=64, bn_size=4, drop_rate=0.,
-                 num_classes=1000, in_channels=1, bayesian=False,
-                 concrete_dropout=False, out_block=None,
-                 memory_efficient=False):
-        """ Init class.
 
-        Parameters
-        ----------
-        growth_rate: int, default 32
-            how many filters to add each layer (`k` in paper).
-        block_config: list of 4 ints, default (3, 12, 24, 16)
-            how many layers in each pooling block.
-        num_init_features: int, default 64
-            the number of filters to learn in the first convolution layer.
-        bn_size: int, default 4
-            multiplicative factor for number of bottle neck layers
-            (i.e. bn_size * k features in the bottleneck layer).
-        drop_rate: float, default 0.
-            dropout rate after each dense layer.
-        num_classes: int, default 1000
-            number of classification classes.
-        memory_efficient: bool, default False
-            if True, uses checkpointing. Much more
-            memory efficient, but slower. Default: *False*. See `"paper"
-            <https://arxiv.org/pdf/1707.06990.pdf>`_.
-        """
+    def __init__(self, growth_rate=32, block_config=(3, 12, 24, 16),
+                 num_init_features=64, mode="classifier",
+                 bn_size=4, num_classes=1000, in_channels=1,
+                 memory_efficient=False):
         super(DenseNet, self).__init__()
-        self.input_imgs = None
+        assert mode in ["classier", "encoder"], "Unknown mode: %s"%mode
         # First convolution
         self.features = nn.Sequential(OrderedDict([
-            ("conv0", nn.Conv3d(in_channels, num_init_features, kernel_size=7,
-                                stride=2, padding=3, bias=False)),
-            ("norm0", nn.BatchNorm3d(num_init_features)),
-            ("relu0", nn.ReLU(inplace=True)),
-            ("pool0", nn.MaxPool3d(kernel_size=3, stride=2, padding=1))
+            ('conv0', nn.Conv3d(in_channels, num_init_features,
+                                kernel_size=7, stride=2, padding=3, bias=False)),
+            ('norm0', nn.BatchNorm3d(num_init_features)),
+            ('relu0', nn.ReLU(inplace=True)),
+            ('pool0', nn.MaxPool3d(kernel_size=3, stride=2, padding=1)),
         ]))
-        self.out_block = out_block
+        self.mode = mode
         self.num_classes = num_classes
         # Each denseblock
         num_features = num_init_features
@@ -311,33 +209,24 @@ class DenseNet(nn.Module):
                 num_input_features=num_features,
                 bn_size=bn_size,
                 growth_rate=growth_rate,
-                drop_rate=drop_rate,
-                bayesian=bayesian,
-                concrete_dropout=concrete_dropout,
                 memory_efficient=memory_efficient
             )
-            self.features.add_module("denseblock%d" % (i + 1), block)
+            self.features.add_module('denseblock%d' % (i + 1), block)
             num_features = num_features + num_layers * growth_rate
             if i != len(block_config) - 1:
                 trans = _Transition(num_input_features=num_features,
-                                    num_output_features=(num_features // 2))
-                self.features.add_module("transition%d" % (i + 1), trans)
+                                    num_output_features=num_features // 2)
+                self.features.add_module('transition%d' % (i + 1), trans)
                 num_features = num_features // 2
-            if out_block == "block%i" % (i + 1):
-                break
+
         self.num_features = num_features
-        if out_block is None:
+
+        if mode == "classifier":
             # Final batch norm
-            self.features.add_module("norm5", nn.BatchNorm3d(num_features))
+            self.features.add_module('norm5', nn.BatchNorm3d(num_features))
             # Linear layer
             self.classifier = nn.Linear(num_features, num_classes)
-        elif out_block == "simCLR":
-            self.hidden_representation = nn.Linear(num_features, 512)
-            self.head_projection = nn.Linear(512, 128)
-        elif out_block == "sup_simCLR":
-            self.hidden_representation = nn.Linear(num_features, 512)
-            self.head_projection = nn.Linear(512, 128)
-            self.classifier = nn.Linear(128, num_classes)
+
         # Official init from torch repo.
         for m in self.modules():
             if isinstance(m, nn.Conv3d):
@@ -349,35 +238,19 @@ class DenseNet(nn.Module):
                 nn.init.constant_(m.bias, 0)
 
     def forward(self, x):
-        self.input_imgs = x.detach().cpu().numpy()
         features = self.features(x)
-        if self.out_block is None:
+        if self.mode == "classifier":
             out = F.relu(features, inplace=True)
             out = F.adaptive_avg_pool3d(out, 1)
             out = torch.flatten(out, 1)
             out = self.classifier(out)
-        elif self.out_block[:5] == "block":
-            out = F.adaptive_avg_pool3d(features, 1)  # final dim ~ 10**4
+            return out.squeeze(dim=1)
+        elif self.mode == "encoder":
+            out = F.adaptive_avg_pool3d(features, 1)
             out = torch.flatten(out, 1)
-        elif self.out_block == "simCLR":
-            out = F.relu(features, inplace=True)
-            out = F.adaptive_avg_pool3d(out, 1)
-            out = torch.flatten(out, 1)
-            out = self.hidden_representation(out)
-            out = F.relu(out, inplace=True)
-            out = self.head_projection(out)
-        elif self.out_block == "sup_simCLR":
-            out = F.relu(features, inplace=True)
-            out = F.adaptive_avg_pool3d(out, 1)
-            out = torch.flatten(out, 1)
-            out = self.hidden_representation(out)
-            out = F.relu(out, inplace=True)
-            out = self.head_projection(out)
-            out = torch.cat([out, self.classifier(out)], dim=1)
-        return out.squeeze(dim=1)
-
-    def get_current_visuals(self):
-        return self.input_imgs
+            return out.squeeze(dim=1)
+        else:
+            raise ValueError("Unknown mode: %s"%self.mode)
 
 
 def _bn_function_factory(norm, relu, conv):
@@ -385,66 +258,48 @@ def _bn_function_factory(norm, relu, conv):
         concated_features = torch.cat(inputs, 1)
         bottleneck_output = conv(relu(norm(concated_features)))
         return bottleneck_output
+
     return bn_function
 
 
 class _DenseLayer(nn.Sequential):
-    def __init__(self, num_input_features, growth_rate, bn_size, drop_rate,
-                 bayesian=False, concrete_dropout=False,
-                 memory_efficient=False):
+    def __init__(self, num_input_features, growth_rate, bn_size, memory_efficient=False):
         super(_DenseLayer, self).__init__()
-        self.add_module("norm1", nn.BatchNorm3d(num_input_features)),
-        self.add_module("relu1", nn.ReLU(inplace=True)),
-        self.add_module("conv1", nn.Conv3d(
-            num_input_features, bn_size * growth_rate, kernel_size=1, stride=1,
-            bias=False)),
-        self.add_module("norm2", nn.BatchNorm3d(bn_size * growth_rate)),
-        self.add_module("relu2", nn.ReLU(inplace=True)),
-        self.add_module("conv2", nn.Conv3d(
-            bn_size * growth_rate, growth_rate, kernel_size=3, stride=1,
-            padding=1, bias=False)),
-        if concrete_dropout:
-            raise NotImplementedError("Concrete dropout not yet implemented.")
-        self.drop_rate = drop_rate
-        self.bayesian = bayesian
+        self.add_module('norm1', nn.BatchNorm3d(num_input_features)),
+        self.add_module('relu1', nn.ReLU(inplace=True)),
+        self.add_module('conv1', nn.Conv3d(num_input_features, bn_size *
+                                           growth_rate, kernel_size=1, stride=1,
+                                           bias=False)),
+        self.add_module('norm2', nn.BatchNorm3d(bn_size * growth_rate)),
+        self.add_module('relu2', nn.ReLU(inplace=True)),
+        self.add_module('conv2', nn.Conv3d(bn_size * growth_rate, growth_rate,
+                                           kernel_size=3, stride=1, padding=1,
+                                           bias=False)),
         self.memory_efficient = memory_efficient
 
     def forward(self, *prev_features):
         bn_function = _bn_function_factory(self.norm1, self.relu1, self.conv1)
-        if self.memory_efficient and any(
-                prev_feature.requires_grad for prev_feature in prev_features):
+        if self.memory_efficient and any(prev_feature.requires_grad for prev_feature in prev_features):
             bottleneck_output = cp.checkpoint(bn_function, *prev_features)
         else:
             bottleneck_output = bn_function(*prev_features)
-        if hasattr(self, "concrete_dropout"):
-            new_features = self.concrete_dropout(
-                self.relu2(self.norm2(bottleneck_output)))
-        else:
-            new_features = self.conv2(
-                self.relu2(self.norm2(bottleneck_output)))
-            if self.drop_rate > 0:
-                new_features = F.dropout(
-                    new_features, p=self.drop_rate,
-                    training=(self.training or self.bayesian))
+
+        new_features = self.conv2(self.relu2(self.norm2(bottleneck_output)))
+
         return new_features
 
 
 class _DenseBlock(nn.Module):
-    def __init__(self, num_layers, num_input_features, bn_size, growth_rate,
-                 drop_rate, bayesian=False, concrete_dropout=False,
-                 memory_efficient=False):
+    def __init__(self, num_layers, num_input_features, bn_size, growth_rate, memory_efficient=False):
         super(_DenseBlock, self).__init__()
         for i in range(num_layers):
             layer = _DenseLayer(
                 num_input_features + i * growth_rate,
                 growth_rate=growth_rate,
                 bn_size=bn_size,
-                drop_rate=drop_rate,
-                bayesian=bayesian,
-                concrete_dropout=concrete_dropout,
                 memory_efficient=memory_efficient,
-            )
-            self.add_module("denselayer%d" % (i + 1), layer)
+                )
+            self.add_module('denselayer%d' % (i + 1), layer)
 
     def forward(self, init_features):
         features = [init_features]
@@ -457,12 +312,11 @@ class _DenseBlock(nn.Module):
 class _Transition(nn.Sequential):
     def __init__(self, num_input_features, num_output_features):
         super(_Transition, self).__init__()
-        self.add_module("norm", nn.BatchNorm3d(num_input_features))
-        self.add_module("relu", nn.ReLU(inplace=True))
-        self.add_module("conv", nn.Conv3d(
-            num_input_features, num_output_features, kernel_size=1, stride=1,
-            bias=False))
-        self.add_module("pool", nn.AvgPool3d(kernel_size=2, stride=2))
+        self.add_module('norm', nn.BatchNorm3d(num_input_features))
+        self.add_module('relu', nn.ReLU(inplace=True))
+        self.add_module('conv', nn.Conv3d(num_input_features, num_output_features,
+                                          kernel_size=1, stride=1, bias=False))
+        self.add_module('pool', nn.AvgPool3d(kernel_size=2, stride=2))
 
 
 ############################################################################
@@ -559,8 +413,9 @@ def get_estimator():
     -----
     It is recommended to create an instance of sklearn.pipeline.Pipeline.
     """
-    net = DenseNet(32, (6, 12, 24, 16), 64, out_block="block4")
-    selector = FeatureExtractor("vbm")
+    root = "'/neurospin/psy_sbox/bd261576/Datasets/OpenBHBChallenge/share/data_challenge'"
+    net = DenseNet(32, (6, 12, 24, 16), 64, mode="encoder")
+    selector = FeatureExtractor("vbm", root, sample_level=True)
     preproc = Standardizer([Crop((1, 121, 128, 121)),
                             Pad([1, 128, 128, 128], mode="constant"),
                             Normalize()])
