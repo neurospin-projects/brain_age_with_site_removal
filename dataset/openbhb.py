@@ -301,7 +301,7 @@ class FeatureExtractor(BaseEstimator, TransformerMixin):
                 "shape": (-1, 1, 182, 218, 182),
                 "size": 1827095}),
             ("fsl_xhemi", {
-                "shape": (-1, 7, 187248),
+                "shape": (-1, 8, 163842),
                 "size": 1310736}),
             ("vbm_roi", {
                 "shape": (-1, 1, 284),
