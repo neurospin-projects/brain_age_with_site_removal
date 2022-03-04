@@ -162,6 +162,14 @@ class SiteEstimator(BaseEstimator):
         y_pred = self.site_estimator.predict_proba(X)
         return y_pred
 
+    def remap(self, y):
+        """
+        :param y: list of labels
+        :return: list of integers using same indexation as .predict()
+        """
+        labels_to_classes = {label: cls for cls, label in enumerate(self.site_estimator.classes_)}
+        y_cls = np.array([labels_to_classes[label] for label in y], dtype=np.int64)
+        return y_cls
 
 class AgeEstimator(BaseEstimator):
     """ Define the age estimator on latent space network features.
